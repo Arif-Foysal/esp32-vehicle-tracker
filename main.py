@@ -3,6 +3,11 @@ import time
 from machine import I2C, Pin, PWM
 import urequests
 import network
+import ujson
+import socket
+import binascii
+import hashlib
+import struct
 
 # ========================================
 # CONFIGURATION
@@ -37,6 +42,17 @@ class Config:
     WIFI_SSID = "car-app"  # Replace with your WiFi network name
     WIFI_PASSWORD = "asdfasdf"  # Replace with your WiFi password
     WIFI_TIMEOUT = 30  # Connection timeout in seconds
+    
+    # Vehicle Settings
+    VEHICLE_ID = "V123"  # Unique vehicle identifier
+    DEFAULT_LATITUDE = 23.798257479710784
+    DEFAULT_LONGITUDE = 90.44980802042723
+    
+    # Backend WebSocket Settings
+    BACKEND_HOST = "192.168.1.100"  # Change to your backend server IP
+    BACKEND_PORT = 8000
+    WEBSOCKET_RECONNECT_DELAY = 5  # seconds
+    STATUS_UPDATE_INTERVAL = 2  # seconds
 
 # ========================================
 # SENSOR LAYER
@@ -234,6 +250,200 @@ class TelegramNotifier:
         # Note: MicroPython doesn't have datetime, so we use a simple format
         return "Current time"  # You could enhance this with RTC if available
 
+class WebSocketClient:
+    """WebSocket client for communicating with backend server"""
+    
+    def __init__(self, wifi_manager, host=None, port=None, vehicle_id=None):
+        self.wifi_manager = wifi_manager
+        self.host = host or Config.BACKEND_HOST
+        self.port = port or Config.BACKEND_PORT
+        self.vehicle_id = vehicle_id or Config.VEHICLE_ID
+        self.socket = None
+        self.connected = False
+        
+    def connect(self):
+        """Connect to WebSocket server"""
+        if not self.wifi_manager.is_connected():
+            print("WiFi not connected. Cannot establish WebSocket connection.")
+            return False
+            
+        try:
+            # Create socket
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(10)
+            
+            # Connect to server
+            print(f"Connecting to WebSocket server {self.host}:{self.port}")
+            self.socket.connect((self.host, self.port))
+            
+            # Perform WebSocket handshake
+            key = binascii.b2a_base64(b"micropython_websocket").decode().strip()
+            handshake = (
+                f"GET /ws/{self.vehicle_id} HTTP/1.1\r\n"
+                f"Host: {self.host}:{self.port}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                "\r\n"
+            )
+            
+            self.socket.send(handshake.encode())
+            
+            # Read handshake response
+            response = self.socket.recv(1024).decode()
+            if "101 Switching Protocols" in response:
+                self.connected = True
+                print("WebSocket connected successfully!")
+                return True
+            else:
+                print(f"WebSocket handshake failed: {response}")
+                self.socket.close()
+                return False
+                
+        except Exception as e:
+            print(f"WebSocket connection error: {e}")
+            if self.socket:
+                self.socket.close()
+            return False
+    
+    def disconnect(self):
+        """Disconnect from WebSocket server"""
+        if self.socket:
+            try:
+                self.socket.close()
+            except:
+                pass
+        self.connected = False
+        print("WebSocket disconnected")
+    
+    def send_message(self, message):
+        """Send message to WebSocket server"""
+        if not self.connected:
+            return False
+            
+        try:
+            # Convert message to JSON
+            json_message = ujson.dumps(message)
+            
+            # Create WebSocket frame
+            frame = self._create_websocket_frame(json_message.encode())
+            self.socket.send(frame)
+            return True
+            
+        except Exception as e:
+            print(f"Error sending WebSocket message: {e}")
+            self.connected = False
+            return False
+    
+    def receive_message(self, timeout=0.1):
+        """Receive message from WebSocket server (non-blocking)"""
+        if not self.connected:
+            return None
+            
+        try:
+            self.socket.settimeout(timeout)
+            data = self.socket.recv(1024)
+            if not data:
+                self.connected = False
+                return None
+                
+            # Parse WebSocket frame
+            message = self._parse_websocket_frame(data)
+            if message:
+                return ujson.loads(message.decode())
+            return None
+            
+        except OSError:  # Timeout or no data available
+            return None
+        except Exception as e:
+            print(f"Error receiving WebSocket message: {e}")
+            self.connected = False
+            return None
+    
+    def _create_websocket_frame(self, payload):
+        """Create WebSocket frame for sending data"""
+        # Simple WebSocket frame for text data
+        length = len(payload)
+        if length < 126:
+            frame = struct.pack('!BB', 0x81, 0x80 | length)  # FIN=1, opcode=1 (text), MASK=1
+        else:
+            frame = struct.pack('!BBH', 0x81, 0x80 | 126, length)
+        
+        # Add masking key (simple implementation)
+        mask = b'\x00\x00\x00\x00'
+        frame += mask
+        
+        # Add masked payload
+        masked_payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        frame += masked_payload
+        
+        return frame
+    
+    def _parse_websocket_frame(self, data):
+        """Parse incoming WebSocket frame"""
+        if len(data) < 2:
+            return None
+            
+        # Simple parsing - assumes unmasked text frame
+        opcode = data[0] & 0x0F
+        if opcode != 1:  # Only handle text frames
+            return None
+            
+        length = data[1] & 0x7F
+        if length == 126:
+            if len(data) < 4:
+                return None
+            length = struct.unpack('!H', data[2:4])[0]
+            payload_start = 4
+        elif length == 127:
+            return None  # Not implemented for large frames
+        else:
+            payload_start = 2
+            
+        if len(data) < payload_start + length:
+            return None
+            
+        return data[payload_start:payload_start + length]
+
+class VehicleController:
+    """Vehicle control system for lock/unlock functionality"""
+    
+    def __init__(self):
+        self.is_locked = False
+        # You can add actual hardware control pins here
+        # self.lock_pin = Pin(LOCK_PIN, Pin.OUT)
+        
+    def lock_vehicle(self):
+        """Lock the vehicle"""
+        self.is_locked = True
+        print("🔒 Vehicle LOCKED")
+        # Add actual hardware control here
+        # self.lock_pin.on()
+        return True
+        
+    def unlock_vehicle(self):
+        """Unlock the vehicle"""
+        self.is_locked = False
+        print("🔓 Vehicle UNLOCKED")
+        # Add actual hardware control here
+        # self.lock_pin.off()
+        return True
+        
+    def emergency_stop(self):
+        """Emergency stop procedure"""
+        print("🚨 EMERGENCY STOP ACTIVATED!")
+        # Add emergency stop logic here
+        # Could disable engine, activate emergency lights, etc.
+        return True
+        
+    def get_status(self):
+        """Get current vehicle status"""
+        return {
+            "locked": self.is_locked,
+            "emergency": False  # You can add more status fields
+        }
+
 # ========================================
 # BUSINESS LOGIC LAYER
 # ========================================
@@ -264,15 +474,55 @@ class DataLogger:
     @staticmethod
     def log_collision_event(ax, ay, az):
         """Log collision detection event"""
-        lat, lon = 37.7749, -122.4194  # Default latitude and longitude
+        lat, lon = Config.DEFAULT_LATITUDE, Config.DEFAULT_LONGITUDE
         timestamp = "Current time"  # Placeholder for timestamp
         print("""
     🚨 COLLISION DETECTED!  
 
-    🚗 Vehicle: V123  
+    🚗 Vehicle: {}  
     📍 Location: https://www.google.com/maps?q={:.6f},{:.6f}  
     🕒 Time: {}
-    """.format(lat, lon, timestamp))
+    """.format(Config.VEHICLE_ID, lat, lon, timestamp))
+    
+    @staticmethod
+    def create_status_message(ax, ay, az, total_accel, vehicle_status):
+        """Create status message for backend"""
+        return {
+            "type": "status_update",
+            "vehicle_id": Config.VEHICLE_ID,
+            "location": {
+                "lat": Config.DEFAULT_LATITUDE,
+                "lon": Config.DEFAULT_LONGITUDE
+            },
+            "acceleration": {
+                "x": ax,
+                "y": ay,
+                "z": az,
+                "total": total_accel
+            },
+            "vehicle_locked": vehicle_status["locked"],
+            "timestamp": "Current time"
+        }
+    
+    @staticmethod
+    def create_collision_alert(ax, ay, az):
+        """Create collision alert message for backend"""
+        return {
+            "type": "collision_alert",
+            "vehicle_id": Config.VEHICLE_ID,
+            "location": {
+                "lat": Config.DEFAULT_LATITUDE,
+                "lon": Config.DEFAULT_LONGITUDE
+            },
+            "acceleration": {
+                "x": ax,
+                "y": ay,
+                "z": az,
+                "total": (ax**2 + ay**2 + az**2) ** 0.5
+            },
+            "timestamp": "Current time",
+            "severity": "high"
+        }
 
 # ========================================
 # APPLICATION LAYER
@@ -288,24 +538,130 @@ class VehicleMonitoringSystem:
         self.wifi_manager = WiFiManager()
         wifi_connected = self.wifi_manager.connect()
         if not wifi_connected:
-            print("WARNING: WiFi not connected. Telegram notifications will be unavailable.")
+            print("WARNING: WiFi not connected. Remote features will be unavailable.")
         
         # Initialize hardware components
         self.accelerometer = MPU6050Sensor(Config.SCL_PIN, Config.SDA_PIN)
         self.buzzer = BuzzerController(Config.BUZZER_PIN)
         self.telegram_notifier = TelegramNotifier(self.wifi_manager)
         
+        # Initialize vehicle control
+        self.vehicle_controller = VehicleController()
+        
+        # Initialize WebSocket client
+        self.websocket_client = WebSocketClient(self.wifi_manager)
+        self.websocket_connected = False
+        
         # Initialize business logic components
         self.collision_detector = CollisionDetector()
         self.logger = DataLogger()
         
+        # Timing variables
+        self.last_status_update = 0
+        self.last_websocket_attempt = 0
+        
         print("System initialized successfully!")
+        print("Vehicle ID: {}".format(Config.VEHICLE_ID))
         print("Monitoring threshold: {:.1f}g".format(Config.COLLISION_THRESHOLD))
         if wifi_connected:
             print(f"WiFi Status: Connected (IP: {self.wifi_manager.get_ip()})")
+            print(f"Backend Server: {Config.BACKEND_HOST}:{Config.BACKEND_PORT}")
         else:
             print("WiFi Status: Disconnected")
         print("=" * 40)
+    
+    def ensure_websocket_connection(self):
+        """Ensure WebSocket connection is established"""
+        current_time = time.time()
+        
+        # Check if we should attempt reconnection
+        if not self.websocket_connected and (current_time - self.last_websocket_attempt) > Config.WEBSOCKET_RECONNECT_DELAY:
+            self.last_websocket_attempt = current_time
+            
+            if self.wifi_manager.is_connected():
+                print("Attempting WebSocket connection...")
+                if self.websocket_client.connect():
+                    self.websocket_connected = True
+                    print("WebSocket connected!")
+                else:
+                    print("WebSocket connection failed. Will retry in {} seconds.".format(Config.WEBSOCKET_RECONNECT_DELAY))
+            else:
+                print("WiFi not connected. Cannot establish WebSocket connection.")
+    
+    def handle_backend_commands(self):
+        """Handle commands received from backend"""
+        if not self.websocket_connected:
+            return
+            
+        # Check for incoming commands
+        message = self.websocket_client.receive_message()
+        if message:
+            print("Received command from backend: {}".format(message))
+            
+            if message.get('type') == 'command':
+                command = message.get('command')
+                
+                if command == 'lock':
+                    success = self.vehicle_controller.lock_vehicle()
+                    self.send_command_response(command, success)
+                    
+                elif command == 'unlock':
+                    success = self.vehicle_controller.unlock_vehicle()
+                    self.send_command_response(command, success)
+                    
+                elif command == 'emergency_stop':
+                    success = self.vehicle_controller.emergency_stop()
+                    self.send_command_response(command, success)
+                    
+                elif command == 'status_request':
+                    self.send_immediate_status_update()
+                    
+                else:
+                    print("Unknown command: {}".format(command))
+    
+    def send_command_response(self, command, success):
+        """Send command execution response to backend"""
+        response = {
+            "type": "command_response",
+            "command": command,
+            "success": success,
+            "vehicle_id": Config.VEHICLE_ID,
+            "timestamp": "Current time"
+        }
+        
+        if self.websocket_connected:
+            if not self.websocket_client.send_message(response):
+                self.websocket_connected = False
+    
+    def send_status_update(self, ax, ay, az, total_accel):
+        """Send status update to backend via WebSocket"""
+        if not self.websocket_connected:
+            return
+            
+        vehicle_status = self.vehicle_controller.get_status()
+        status_message = self.logger.create_status_message(ax, ay, az, total_accel, vehicle_status)
+        
+        if not self.websocket_client.send_message(status_message):
+            print("Failed to send status update. WebSocket connection lost.")
+            self.websocket_connected = False
+    
+    def send_immediate_status_update(self):
+        """Send immediate status update (for status requests)"""
+        # Read current sensor data
+        ax, ay, az = self.accelerometer.read_acceleration()
+        total_accel = self.collision_detector.calculate_magnitude(ax, ay, az)
+        self.send_status_update(ax, ay, az, total_accel)
+    
+    def send_collision_alert(self, ax, ay, az):
+        """Send collision alert to backend"""
+        if not self.websocket_connected:
+            return
+            
+        alert_message = self.logger.create_collision_alert(ax, ay, az)
+        
+        if not self.websocket_client.send_message(alert_message):
+            print("Failed to send collision alert. WebSocket connection lost.")
+            self.websocket_connected = False
     
     def process_sensor_data(self):
         """Process one cycle of sensor data"""
@@ -318,6 +674,12 @@ class VehicleMonitoringSystem:
         # Log sensor data
         self.logger.log_sensor_data(ax, ay, az, total_accel)
         
+        # Send periodic status updates to backend
+        current_time = time.time()
+        if (current_time - self.last_status_update) >= Config.STATUS_UPDATE_INTERVAL:
+            self.send_status_update(ax, ay, az, total_accel)
+            self.last_status_update = current_time
+        
         # Check for collision and respond
         if self.collision_detector.is_collision(total_accel):
             self._handle_collision_event(ax, ay, az)
@@ -327,18 +689,32 @@ class VehicleMonitoringSystem:
         self.logger.log_collision_event(ax, ay, az)
         self.buzzer.sound_alert()
         self.telegram_notifier.send_collision_alert(ax, ay, az)
+        self.send_collision_alert(ax, ay, az)
 
-    
     def run(self):
         """Main execution loop"""
         try:
             while True:
+                # Ensure WebSocket connection
+                self.ensure_websocket_connection()
+                
+                # Handle backend commands
+                self.handle_backend_commands()
+                
+                # Process sensor data
                 self.process_sensor_data()
+                
                 time.sleep(Config.SENSOR_READ_INTERVAL)
+                
         except KeyboardInterrupt:
             print("\nSystem stopped by user")
         except Exception as e:
             print("System error: {}".format(e))
+        finally:
+            # Clean up connections
+            if self.websocket_connected:
+                self.websocket_client.disconnect()
+            self.wifi_manager.disconnect()
 
 # ========================================
 # ENTRY POINT

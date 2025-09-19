@@ -1,6 +1,6 @@
 # ESP32-S3 Vehicle Collision Detection System
 
-A comprehensive collision detection system using ESP32-S3 microcontroller with MPU6050 accelerometer, buzzer alerts, and Telegram notifications.
+A comprehensive collision detection system using ESP32-S3 microcontroller with MPU6050 accelerometer, buzzer alerts, Telegram notifications, and **real-time WebSocket communication with FastAPI backend**.
 
 ## 🚗 System Overview
 
@@ -8,6 +8,23 @@ This system continuously monitors vehicle acceleration and detects potential col
 - 🔊 Sounds an emergency buzzer pattern
 - 📱 Sends detailed Telegram notification with location
 - 📊 Logs collision data with acceleration values
+- **🌐 Sends real-time alerts to backend server via WebSocket**
+- **🎛️ Receives remote commands (lock/unlock, emergency stop)**
+
+## ✨ New Features
+
+### Real-time Backend Communication
+- **WebSocket Connection**: Low-latency bidirectional communication
+- **Live Monitoring**: Real-time vehicle status, location, and sensor data
+- **Remote Control**: Lock/unlock vehicle and emergency stop commands
+- **Web Dashboard**: Browser-based monitoring and control interface
+- **Multi-vehicle Support**: Monitor multiple vehicles simultaneously
+
+### Vehicle Control
+- **Lock/Unlock**: Remote vehicle locking system
+- **Emergency Stop**: Remote emergency procedures
+- **Status Monitoring**: Real-time vehicle status updates
+- **Location Tracking**: GPS coordinates (configurable)
 
 ## 🔧 Hardware Components
 
@@ -171,19 +188,46 @@ class Config:
 2. Connect buzzer to GPIO10 and GND
 3. Power ESP32-S3 via USB-C
 
-### 2. Software Setup
+### 2. Backend Server Setup (NEW!)
+1. Navigate to backend directory: `cd backend`
+2. Run setup script: `./setup.sh` (or manually install dependencies)
+3. Update `BACKEND_HOST` in ESP32 `main.py` to your server's IP address
+4. Start the backend server: `python main.py`
+5. Access web dashboard at `http://localhost:8000`
+
+### 3. Software Setup
 1. Flash MicroPython firmware to ESP32-S3
 2. Configure WiFi credentials in `main.py`
 3. Set up Telegram bot and get bot token
-4. Upload code to ESP32-S3
+4. **Configure backend server IP in `Config.BACKEND_HOST`**
+5. Upload code to ESP32-S3
 
-### 3. Telegram Bot Setup
+### 4. Telegram Bot Setup
 1. Message @BotFather on Telegram
 2. Create new bot: `/newbot`
 3. Get bot token from BotFather
 4. Get your chat ID by messaging @userinfobot
 
-### 4. Upload and Run
+### 5. Configuration
+Update these settings in `main.py`:
+
+```python
+class Config:
+    # WiFi Settings
+    WIFI_SSID = "your_wifi_name"
+    WIFI_PASSWORD = "your_wifi_password"
+    
+    # Backend Settings (NEW!)
+    BACKEND_HOST = "192.168.1.100"  # Your server IP
+    BACKEND_PORT = 8000
+    VEHICLE_ID = "V123"  # Unique vehicle identifier
+    
+    # Telegram Settings
+    BOT_TOKEN = "your_bot_token"
+    CHAT_ID = "your_chat_id"
+```
+
+### 6. Upload and Run
 ```bash
 # Upload main.py to ESP32-S3
 mpremote connect /dev/cu.usbserial-10 fs cp main.py :/main.py
@@ -192,23 +236,47 @@ mpremote connect /dev/cu.usbserial-10 fs cp main.py :/main.py
 mpremote connect /dev/cu.usbserial-10 run main.py
 ```
 
+### 7. Testing Backend Communication
+Use the test client to verify backend functionality:
+```bash
+cd backend
+python test_client.py
+```
+
 ## 📊 System Operation
 
-### Normal Operation
+### Normal Operation with Backend
 ```
 === Vehicle Collision Detection System ===
+Initializing components...
 Connecting to WiFi: YourWiFiName
 WiFi connected successfully! IP: 192.168.1.100
 System initialized successfully!
+Vehicle ID: V123
 Monitoring threshold: 1.5g
 WiFi Status: Connected (IP: 192.168.1.100)
+Backend Server: 192.168.1.100:8000
 ========================================
+Attempting WebSocket connection...
+WebSocket connected!
 Live Accel: X=0.43, Y=0.53, Z=-0.80, Total=1.05
 Live Accel: X=0.44, Y=0.52, Z=-0.79, Total=1.04
 ...
 ```
 
-### Collision Detected
+### Remote Commands
+```
+Received command from backend: {'type': 'command', 'command': 'lock', 'timestamp': '2023-09-19T10:30:00'}
+🔒 Vehicle LOCKED
+
+Received command from backend: {'type': 'command', 'command': 'unlock', 'timestamp': '2023-09-19T10:31:00'}
+🔓 Vehicle UNLOCKED
+
+Received command from backend: {'type': 'command', 'command': 'emergency_stop', 'timestamp': '2023-09-19T10:32:00'}
+🚨 EMERGENCY STOP ACTIVATED!
+```
+
+### Collision Detected with Backend Alert
 ```
 Live Accel: X=2.50, Y=1.80, Z=0.95, Total=3.20
 
@@ -222,6 +290,13 @@ Sending Telegram notification...
 Telegram notification sent successfully!
 ```
 
+### Web Dashboard Features
+- **Real-time Monitoring**: View live vehicle location and acceleration data
+- **Vehicle Status**: See lock/unlock status and last update time
+- **Remote Control**: Send lock/unlock and emergency stop commands
+- **Location Links**: Click coordinates to view location in Google Maps
+- **Multi-vehicle Support**: Monitor multiple vehicles simultaneously
+
 ## 🔧 Troubleshooting
 
 ### Common Issues
@@ -230,6 +305,24 @@ Telegram notification sent successfully!
 - Check SSID and password in Config
 - Ensure WiFi is 2.4GHz (ESP32 limitation)
 - Verify WiFi range and signal strength
+
+**WebSocket Connection Failed (NEW!)**
+- Check if backend server is running (`python backend/main.py`)
+- Verify `BACKEND_HOST` IP address in ESP32 config
+- Ensure both devices are on the same network
+- Check firewall settings on server (port 8000)
+
+**Remote Commands Not Working**
+- Verify WebSocket connection is established
+- Check command format in web dashboard
+- Monitor ESP32 console for error messages
+- Ensure valid command names (lock, unlock, emergency_stop)
+
+**No Status Updates in Dashboard**
+- Confirm WiFi connection on ESP32
+- Check WebSocket connection status
+- Verify `STATUS_UPDATE_INTERVAL` setting
+- Refresh browser page
 
 **MPU6050 Not Responding**
 - Check I2C wiring (SCL=8, SDA=9)
