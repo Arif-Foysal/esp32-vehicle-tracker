@@ -47,11 +47,12 @@ class Config:
     # Backend Settings
     BACKEND_HOST = "esp32-vehicle-tracker.onrender.com"  # Just the hostname
     BACKEND_PORT = 443  # HTTPS port for secure connections
+    # Primary HTTPS URL (will fallback to HTTP if SSL fails)
     BACKEND_URL = "https://esp32-vehicle-tracker.onrender.com"  # Full URL for HTTP requests
-    # For testing with SSL issues, you can temporarily use HTTP:
-    # BACKEND_URL = "http://esp32-vehicle-tracker.onrender.com"  # Uncomment this line for HTTP testing
-    WEBSOCKET_RECONNECT_DELAY = 5  # seconds
-    STATUS_UPDATE_INTERVAL = 2  # seconds
+    # Fallback HTTP URL for ESP32 compatibility (most cloud services support both)
+    BACKEND_URL_FALLBACK = "http://esp32-vehicle-tracker.onrender.com"  # HTTP fallback
+    WEBSOCKET_RECONNECT_DELAY = 10  # seconds - increased for cloud services
+    STATUS_UPDATE_INTERVAL = 30  # seconds - reduced frequency to be gentler on free tier
 
 # ========================================
 # SENSOR LAYER
@@ -250,64 +251,89 @@ class TelegramNotifier:
         return "Current time"  # You could enhance this with RTC if available
 
 class BackendClient:
-    """HTTP-based client for communicating with backend server (more reliable than WebSocket for MicroPython)"""
+    """HTTP-based client for communicating with backend server (ESP32-optimized)"""
     
     def __init__(self, wifi_manager, vehicle_id=None):
         self.wifi_manager = wifi_manager
         self.vehicle_id = vehicle_id or Config.VEHICLE_ID
-        self.base_url = Config.BACKEND_URL
+        self.base_url = None  # Will be determined during connection
         self.connected = False
+        self.use_https = False
         
     def connect(self):
-        """Test connection to backend server"""
+        """Test connection to backend server with fallback"""
         if not self.wifi_manager.is_connected():
             print("WiFi not connected. Cannot establish backend connection.")
             return False
-            
-        # Try multiple endpoints to test connectivity
-        test_endpoints = [
-            f"{self.base_url}/health",           # Simple health check
-            f"{self.base_url}/api/vehicles",     # Main API endpoint
+        
+        # Try HTTP first (more reliable for ESP32)
+        urls_to_try = [
+            (Config.BACKEND_URL_FALLBACK, False),  # HTTP first
+            (Config.BACKEND_URL, True)             # HTTPS as fallback
         ]
         
-        for url in test_endpoints:
-            try:
-                print(f"Testing connection to {url}")
-                response = urequests.get(url, timeout=15)
-                
-                if response.status_code == 200:
-                    self.connected = True
-                    print("Backend connection successful!")
-                    response.close()
-                    return True
-                else:
-                    print(f"Backend responded with status: {response.status_code}")
-                    response.close()
+        for base_url, is_https in urls_to_try:
+            print(f"Trying {'HTTPS' if is_https else 'HTTP'} connection: {base_url}")
+            
+            # Test endpoints in order of simplicity
+            test_endpoints = [
+                f"{base_url}/health",
+                f"{base_url}/",
+                f"{base_url}/api/vehicles"
+            ]
+            
+            for endpoint in test_endpoints:
+                try:
+                    print(f"Testing: {endpoint}")
+                    response = urequests.get(endpoint, timeout=15)
                     
-            except OSError as e:
-                error_code = e.args[0] if e.args else "Unknown"
-                print(f"Connection error {error_code} for {url}")
-                if error_code == -202:
-                    print("SSL/TLS error detected. This is common with MicroPython HTTPS requests.")
-                continue
-            except Exception as e:
-                print(f"Backend connection error: {e}")
-                continue
+                    if 200 <= response.status_code < 400:
+                        self.base_url = base_url
+                        self.use_https = is_https
+                        self.connected = True
+                        print(f"✅ Backend connection successful via {'HTTPS' if is_https else 'HTTP'}!")
+                        print(f"Status: {response.status_code}")
+                        response.close()
+                        return True
+                    else:
+                        print(f"❌ HTTP {response.status_code}")
+                        response.close()
+                        
+                except OSError as e:
+                    error_code = e.args[0] if e.args else "Unknown"
+                    if error_code == -202:
+                        print(f"❌ SSL/TLS error: {error_code} (Expected for HTTPS on ESP32)")
+                    elif error_code == -2:
+                        print(f"❌ DNS resolution failed: {error_code}")
+                    else:
+                        print(f"❌ Network error: {error_code}")
+                    continue
+                    
+                except Exception as e:
+                    print(f"❌ Connection error: {e}")
+                    continue
         
-        print("All connection attempts failed.")
+        print("❌ All connection attempts failed.")
         return False
     
     def disconnect(self):
         """Disconnect from backend server"""
         self.connected = False
+        self.base_url = None
         print("Backend disconnected")
     
-    def _make_request(self, method, url, data=None, retries=2):
-        """Make HTTP request with error handling and retries"""
+    def _make_request(self, method, endpoint, data=None, retries=1):
+        """Make HTTP request with minimal retries"""
+        if not self.connected or not self.base_url:
+            return None
+            
+        url = f"{self.base_url}{endpoint}"
         headers = {"Content-Type": "application/json"}
         
         for attempt in range(retries + 1):
             try:
+                print(f"🔄 {method} {endpoint} (attempt {attempt + 1})")
+                
                 if method.upper() == "GET":
                     response = urequests.get(url, timeout=10)
                 elif method.upper() == "POST":
@@ -316,36 +342,32 @@ class BackendClient:
                     return None
                 
                 # Check if response is successful
-                success = 200 <= response.status_code < 300
-                
-                if success:
+                if 200 <= response.status_code < 300:
+                    print(f"✅ Success: {response.status_code}")
                     try:
-                        result = response.json() if response.text else {}
+                        result = response.json() if response.text else {"success": True}
                         response.close()
                         return result
                     except:
                         response.close()
                         return {"success": True}
                 else:
-                    print(f"HTTP {response.status_code} error for {url}")
+                    print(f"❌ HTTP {response.status_code}")
                     response.close()
                     
             except OSError as e:
                 error_code = e.args[0] if e.args else "Unknown"
-                if error_code == -202:
-                    print(f"SSL error on attempt {attempt + 1}/{retries + 1}")
-                else:
-                    print(f"Network error {error_code} on attempt {attempt + 1}/{retries + 1}")
-                    
+                print(f"❌ Network error {error_code}")
                 if attempt < retries:
-                    time.sleep(1)  # Wait before retry
+                    time.sleep(2)  # Wait before retry
                     
             except Exception as e:
-                print(f"Request error: {e}")
+                print(f"❌ Request error: {e}")
                 if attempt < retries:
-                    time.sleep(1)
+                    time.sleep(2)
         
-        # All attempts failed
+        # All attempts failed - disconnect to trigger reconnection
+        print("❌ Request failed - marking as disconnected")
         self.connected = False
         return None
     
@@ -354,34 +376,43 @@ class BackendClient:
         if not self.connected:
             return False
             
-        url = f"{self.base_url}/api/vehicles/{self.vehicle_id}/status"
+        endpoint = f"/api/vehicles/{self.vehicle_id}/status"
         data = ujson.dumps(message)
         
-        result = self._make_request("POST", url, data)
-        return result is not None
+        result = self._make_request("POST", endpoint, data)
+        success = result is not None
+        
+        if success:
+            print("📊 Status update sent successfully")
+        else:
+            print("❌ Failed to send status update")
+            
+        return success
     
     def send_collision_alert(self, message):
         """Send collision alert to backend"""
         if not self.connected:
             return False
             
-        url = f"{self.base_url}/api/vehicles/{self.vehicle_id}/alert"
+        endpoint = f"/api/vehicles/{self.vehicle_id}/alert"
         data = ujson.dumps(message)
         
-        result = self._make_request("POST", url, data)
+        result = self._make_request("POST", endpoint, data)
         
         if result:
-            print("Collision alert sent to backend!")
+            print("🚨 Collision alert sent to backend!")
             return True
-        return False
+        else:
+            print("❌ Failed to send collision alert")
+            return False
     
     def check_for_commands(self):
         """Check for pending commands from backend"""
         if not self.connected:
             return None
             
-        url = f"{self.base_url}/api/vehicles/{self.vehicle_id}/commands"
-        result = self._make_request("GET", url)
+        endpoint = f"/api/vehicles/{self.vehicle_id}/commands"
+        result = self._make_request("GET", endpoint)
         
         return result if result else None
     
@@ -390,7 +421,7 @@ class BackendClient:
         if not self.connected:
             return False
             
-        url = f"{self.base_url}/api/vehicles/{self.vehicle_id}/command-response"
+        endpoint = f"/api/vehicles/{self.vehicle_id}/command-response"
         
         response_data = {
             "command_id": command_id,
@@ -401,7 +432,7 @@ class BackendClient:
         }
         
         data = ujson.dumps(response_data)
-        result = self._make_request("POST", url, data)
+        result = self._make_request("POST", endpoint, data)
         
         return result is not None
 
@@ -566,6 +597,7 @@ class VehicleMonitoringSystem:
         if wifi_connected:
             print(f"WiFi Status: Connected (IP: {self.wifi_manager.get_ip()})")
             print(f"Backend Server: {Config.BACKEND_URL}")
+            print("Note: Will try HTTP first, then HTTPS if available")
         else:
             print("WiFi Status: Disconnected")
         print("=" * 40)
@@ -579,14 +611,15 @@ class VehicleMonitoringSystem:
             self.last_backend_attempt = current_time
             
             if self.wifi_manager.is_connected():
-                print("Attempting backend connection...")
+                print("🔄 Attempting backend connection...")
                 if self.backend_client.connect():
                     self.backend_connected = True
-                    print("Backend connected!")
+                    protocol = "HTTPS" if self.backend_client.use_https else "HTTP"
+                    print(f"✅ Backend connected via {protocol}!")
                 else:
-                    print("Backend connection failed. Will retry in {} seconds.".format(Config.WEBSOCKET_RECONNECT_DELAY))
+                    print(f"❌ Backend connection failed. Will retry in {Config.WEBSOCKET_RECONNECT_DELAY} seconds.")
             else:
-                print("WiFi not connected. Cannot establish backend connection.")
+                print("❌ WiFi not connected. Cannot establish backend connection.")
     
     def handle_backend_commands(self):
         """Handle commands received from backend"""
