@@ -160,6 +160,12 @@ async def get_dashboard():
     """
     return HTMLResponse(content=html_content)
 
+# Health check endpoint for ESP32 (simple GET without SSL complications)
+@app.get("/health")
+async def health_check():
+    """Simple health check endpoint for ESP32"""
+    return {"status": "ok", "service": "vehicle-monitoring", "timestamp": datetime.now().isoformat()}
+
 @app.websocket("/ws/{vehicle_id}")
 async def websocket_endpoint(websocket: WebSocket, vehicle_id: str):
     await manager.connect(websocket, vehicle_id)
@@ -189,6 +195,50 @@ async def websocket_endpoint(websocket: WebSocket, vehicle_id: str):
 async def get_all_vehicles_status():
     """Get status of all connected vehicles"""
     return manager.vehicle_status
+
+@app.post("/api/vehicles/{vehicle_id}/status")
+async def update_vehicle_status(vehicle_id: str, status_data: dict):
+    """Update vehicle status via HTTP POST"""
+    try:
+        logger.info(f"Received status update from {vehicle_id}: {status_data}")
+        manager.update_vehicle_status(vehicle_id, status_data)
+        return {"success": True, "message": "Status updated successfully"}
+    except Exception as e:
+        logger.error(f"Error updating vehicle status: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.post("/api/vehicles/{vehicle_id}/alert")
+async def receive_collision_alert(vehicle_id: str, alert_data: dict):
+    """Receive collision alert via HTTP POST"""
+    try:
+        logger.warning(f"COLLISION ALERT from {vehicle_id}!")
+        logger.info(f"Alert data: {alert_data}")
+        
+        # Update vehicle status with alert
+        manager.update_vehicle_status(vehicle_id, alert_data)
+        
+        # You could trigger additional actions here (send notifications, etc.)
+        
+        return {"success": True, "message": "Alert received successfully"}
+    except Exception as e:
+        logger.error(f"Error processing collision alert: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.get("/api/vehicles/{vehicle_id}/commands")
+async def get_pending_commands(vehicle_id: str):
+    """Get pending commands for a vehicle"""
+    # For now, return empty list - you can implement a command queue here
+    return []
+
+@app.post("/api/vehicles/{vehicle_id}/command-response")
+async def receive_command_response(vehicle_id: str, response_data: dict):
+    """Receive command execution response from vehicle"""
+    try:
+        logger.info(f"Command response from {vehicle_id}: {response_data}")
+        return {"success": True, "message": "Response received successfully"}
+    except Exception as e:
+        logger.error(f"Error processing command response: {e}")
+        return {"success": False, "message": str(e)}
 
 @app.get("/api/vehicles/{vehicle_id}/status")
 async def get_vehicle_status(vehicle_id: str):

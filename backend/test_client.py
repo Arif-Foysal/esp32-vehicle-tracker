@@ -11,13 +11,13 @@ import json
 import time
 import random
 
-BACKEND_HOST = "localhost"
-BACKEND_PORT = 8000
+BACKEND_HOST = "esp32-vehicle-tracker.onrender.com"  # Remove https:// prefix
+# BACKEND_PORT = 8000  # Not needed for Render deployment
 VEHICLE_ID = "TEST_V001"
 
 async def simulate_vehicle():
     """Simulate vehicle data and commands"""
-    uri = f"ws://{BACKEND_HOST}:{BACKEND_PORT}/ws/{VEHICLE_ID}"
+    uri = f"wss://{BACKEND_HOST}/ws/{VEHICLE_ID}"  # Use wss:// for secure WebSocket
     
     try:
         async with websockets.connect(uri) as websocket:
@@ -104,7 +104,7 @@ async def simulate_vehicle():
 
 if __name__ == "__main__":
     print("=== Vehicle Backend Test Script ===")
-    print(f"Connecting to {BACKEND_HOST}:{BACKEND_PORT}")
+    print(f"Connecting to wss://{BACKEND_HOST}")
     print("Make sure the backend server is running!")
     print()
     
